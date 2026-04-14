@@ -25,7 +25,9 @@
     <Compile Include="Spritzer.py" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include=".gitignore" />
     <Content Include="example.qss" />
+    <Content Include="README.md" />
     <Content Include="Spritzer.qss" />
     <Content Include="SpritzerArcadeGlow.qss" />
     <Content Include="theme1.qss" />

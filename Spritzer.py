@@ -280,7 +280,7 @@ class SpriteSheetSplitter(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Spritzer - Sprite Sheet Splitter")
-        self.setGeometry(100, 100, 1200, 700)
+        self.setGeometry(100, 100, 1360, 760)
         self.setAcceptDrops(True)
 
         logo_path = Path(__file__).with_name("spritzer.png")
@@ -430,8 +430,8 @@ class SpriteSheetSplitter(QMainWindow):
         # Left panel for settings (wrapped in a scroll area to prevent overflowing window height)
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
-        settings_scroll.setMaximumWidth(480)
-        settings_scroll.setMinimumWidth(320)
+        settings_scroll.setMaximumWidth(620)
+        settings_scroll.setMinimumWidth(460)
         settings_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
 
         left_panel_widget = QWidget()
@@ -569,9 +569,17 @@ class SpriteSheetSplitter(QMainWindow):
         offset_row = self._create_row_layout(self.offset_x_spinbox, self.offset_y_spinbox)
         spacing_row = self._create_row_layout(self.spacing_x_spinbox, self.spacing_y_spinbox)
 
+        self.apply_spacing_button = QPushButton("Apply Spacing to Sheet")
+        self.apply_spacing_button.clicked.connect(self.apply_spacing_to_sheet)
+        self.apply_spacing_button.setEnabled(False)
+        self.apply_spacing_button.setToolTip(
+            "Repack current sprites with the current spacing values to create gaps between sprites."
+        )
+
         controls_layout.addRow("Cell Size:", cell_size_row)
         controls_layout.addRow("Offset:", offset_row)
         controls_layout.addRow("Spacing:", spacing_row)
+        controls_layout.addRow("Repack:", self.apply_spacing_button)
 
         left_panel.addWidget(controls_group)
 
@@ -788,9 +796,10 @@ class SpriteSheetSplitter(QMainWindow):
         self.detect_mode_radio.blockSignals(False)
         grid_enabled = not use_detected
         for sb in [self.width_spinbox, self.height_spinbox,
-                   self.offset_x_spinbox, self.offset_y_spinbox,
-                   self.spacing_x_spinbox, self.spacing_y_spinbox]:
+                   self.offset_x_spinbox, self.offset_y_spinbox]:
             sb.setEnabled(grid_enabled)
+        self.spacing_x_spinbox.setEnabled(True)
+        self.spacing_y_spinbox.setEnabled(True)
         if self.sprite_item:
             self.sprite_item.set_show_grid(grid_enabled)
             self.sprite_item.set_detected_sprites(self.detected_sprites)
@@ -1098,6 +1107,7 @@ class SpriteSheetSplitter(QMainWindow):
             # Enable buttons
             self.export_button.setEnabled(True)
             self.detect_button.setEnabled(True)
+            self.apply_spacing_button.setEnabled(True)
 
             # Reset to grid mode
             self.grid_mode_radio.setChecked(True)
@@ -1224,6 +1234,7 @@ class SpriteSheetSplitter(QMainWindow):
         # Disable export and detect until sprites are added
         self.export_button.setEnabled(False)
         self.detect_button.setEnabled(False)
+        self.apply_spacing_button.setEnabled(False)
 
         # Reset to grid mode
         self.grid_mode_radio.setChecked(True)
@@ -1377,6 +1388,116 @@ class SpriteSheetSplitter(QMainWindow):
             f"Successfully exported {exported_count} sprites to:\n{output_dir}"
         )
 
+    def apply_spacing_to_sheet(self):
+        """Repack current sprite regions with user-selected spacing."""
+        if not self.sprite_sheet or self.sprite_sheet.isNull():
+            QMessageBox.warning(self, "No Sprite Sheet", "Please load or import sprites first.")
+            return
+
+        spacing_x = self.spacing_x_spinbox.value()
+        spacing_y = self.spacing_y_spinbox.value()
+
+        if spacing_x == 0 and spacing_y == 0:
+            QMessageBox.information(
+                self,
+                "No Spacing Applied",
+                "Set Spacing X or Spacing Y above 0, then run this action again."
+            )
+            return
+
+        source_sprites = self.detected_sprites if self.detect_mode_radio.isChecked() else self.grid_sprites
+        if not source_sprites and self.sprite_sheet:
+            self.update_grid()
+            source_sprites = self.grid_sprites
+
+        if not source_sprites:
+            QMessageBox.warning(
+                self,
+                "No Sprites",
+                "No sprite regions are available to repack. Use grid settings or auto-detect first."
+            )
+            return
+
+        sprites = []
+        for rect in source_sprites:
+            sprite = self.sprite_sheet.copy(rect)
+            if not sprite.isNull():
+                sprites.append(sprite)
+
+        if not sprites:
+            QMessageBox.warning(self, "No Sprites", "Could not extract sprite regions from the current sheet.")
+            return
+
+        self.imported_sprites = sprites.copy()
+
+        # Pack sprites into a near-square fixed-column grid
+        sprite_count = len(sprites)
+        estimated_cols = max(1, int((sprite_count ** 0.5) + 0.999))
+        rows = [
+            sprites[i:i + estimated_cols]
+            for i in range(0, sprite_count, estimated_cols)
+        ]
+
+        canvas_width = 0
+        canvas_height = 0
+        row_heights = []
+
+        for row in rows:
+            row_width = sum(s.width() for s in row) + spacing_x * (len(row) - 1)
+            row_height = max(s.height() for s in row)
+            canvas_width = max(canvas_width, row_width)
+            row_heights.append(row_height)
+
+        canvas_height = sum(row_heights) + spacing_y * (len(rows) - 1)
+
+        result = QImage(canvas_width, canvas_height, QImage.Format.Format_ARGB32)
+        result.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(result)
+
+        y_offset = 0
+        sprite_regions = []
+
+        for row_idx, row in enumerate(rows):
+            x_offset = 0
+            row_height = row_heights[row_idx]
+
+            for sprite in row:
+                painter.drawPixmap(x_offset, y_offset, sprite)
+                sprite_regions.append(QRect(x_offset, y_offset, sprite.width(), sprite.height()))
+                x_offset += sprite.width() + spacing_x
+
+            y_offset += row_height + spacing_y
+
+        painter.end()
+
+        self.sprite_sheet = QPixmap.fromImage(result)
+        self.sprite_item.setPixmap(self.sprite_sheet)
+        self.graphics_scene.setSceneRect(QRectF(self.sprite_sheet.rect()))
+
+        self.graphics_view.reset_zoom()
+        self.graphics_view.fitInView(self.graphics_scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+        self.detected_sprites = sprite_regions
+        self.grid_sprites = []
+        self.selected_indices.clear()
+
+        if self.sprite_item:
+            self.sprite_item.set_detected_sprites(sprite_regions)
+            self.sprite_item.set_selected_indices(self.selected_indices)
+
+        self.detect_mode_radio.setChecked(True)
+        self.on_mode_changed()
+
+        self.export_button.setEnabled(True)
+        self.detect_button.setEnabled(True)
+        self.sort_button.setEnabled(True)
+
+        QMessageBox.information(
+            self,
+            "Spacing Applied",
+            f"Repacked {len(sprite_regions)} sprites with spacing X={spacing_x}, Y={spacing_y}."
+        )
+
     def detect_sprites(self):
         """Automatically detect sprite boundaries using alpha channel analysis"""
         if not self.sprite_sheet or self.sprite_sheet.isNull():
@@ -1498,8 +1619,8 @@ class SpriteSheetSplitter(QMainWindow):
             self.height_spinbox.setEnabled(grid_enabled)
             self.offset_x_spinbox.setEnabled(grid_enabled)
             self.offset_y_spinbox.setEnabled(grid_enabled)
-            self.spacing_x_spinbox.setEnabled(grid_enabled)
-            self.spacing_y_spinbox.setEnabled(grid_enabled)
+            self.spacing_x_spinbox.setEnabled(True)
+            self.spacing_y_spinbox.setEnabled(True)
 
             # Update info display
             if use_detected and self.detected_sprites:
@@ -1593,40 +1714,13 @@ class SpriteSheetSplitter(QMainWindow):
             # Store imported sprites for later sorting
             self.imported_sprites = sprites.copy()
 
-            # Estimate a reasonable max row width (based on a square-ish layout)
+            # Pack sprites into a near-square fixed-column grid
             sprite_count = len(sprites)
-            estimated_cols = int((sprite_count ** 0.5) + 0.999)
-
-            # Calculate average sprite width for row width estimation
-            avg_width = sum(s.width() for s in sprites) / len(sprites)
-            max_row_width = int(estimated_cols * avg_width + (estimated_cols - 1) * spacing_x)
-
-            # Pack sprites into rows
-            rows = []
-            current_row = []
-            current_row_width = 0
-
-            for sprite in sprites:
-                sprite_width = sprite.width()
-
-                # Check if sprite fits in current row
-                needed_width = sprite_width
-                if current_row:
-                    needed_width += spacing_x
-
-                if current_row and (current_row_width + needed_width > max_row_width):
-                    # Start new row
-                    rows.append(current_row)
-                    current_row = [sprite]
-                    current_row_width = sprite_width
-                else:
-                    # Add to current row
-                    current_row.append(sprite)
-                    current_row_width += needed_width
-
-            # Add last row
-            if current_row:
-                rows.append(current_row)
+            estimated_cols = max(1, int((sprite_count ** 0.5) + 0.999))
+            rows = [
+                sprites[i:i + estimated_cols]
+                for i in range(0, sprite_count, estimated_cols)
+            ]
 
             # Calculate canvas dimensions
             canvas_width = 0
@@ -1689,6 +1783,7 @@ class SpriteSheetSplitter(QMainWindow):
             self.export_button.setEnabled(True)
             self.detect_button.setEnabled(True)
             self.sort_button.setEnabled(True)  # Enable sort for variable-size imports
+            self.apply_spacing_button.setEnabled(True)
 
             QMessageBox.information(
                 self,
@@ -1769,6 +1864,7 @@ class SpriteSheetSplitter(QMainWindow):
             # Enable export and detect buttons
             self.export_button.setEnabled(True)
             self.detect_button.setEnabled(True)
+            self.apply_spacing_button.setEnabled(True)
 
             QMessageBox.information(
                 self,
@@ -1880,38 +1976,13 @@ class SpriteSheetSplitter(QMainWindow):
         spacing_y = self.spacing_y_spinbox.value()
 
         sprite_count = len(sorted_sprites)
-        estimated_cols = int((sprite_count ** 0.5) + 0.999)
+        estimated_cols = max(1, int((sprite_count ** 0.5) + 0.999))
 
-        # Calculate average sprite width for row width estimation
-        avg_width = sum(s.width() for s in sorted_sprites) / len(sorted_sprites)
-        max_row_width = int(estimated_cols * avg_width + (estimated_cols - 1) * spacing_x)
-
-        # Pack sprites into rows
-        rows = []
-        current_row = []
-        current_row_width = 0
-
-        for sprite in sorted_sprites:
-            sprite_width = sprite.width()
-
-            # Check if sprite fits in current row
-            needed_width = sprite_width
-            if current_row:
-                needed_width += spacing_x
-
-            if current_row and (current_row_width + needed_width > max_row_width):
-                # Start new row
-                rows.append(current_row)
-                current_row = [sprite]
-                current_row_width = sprite_width
-            else:
-                # Add to current row
-                current_row.append(sprite)
-                current_row_width += needed_width
-
-        # Add last row
-        if current_row:
-            rows.append(current_row)
+        # Pack sprites into a near-square fixed-column grid
+        rows = [
+            sorted_sprites[i:i + estimated_cols]
+            for i in range(0, sprite_count, estimated_cols)
+        ]
 
         # Calculate canvas dimensions
         canvas_width = 0
